@@ -9,25 +9,23 @@ const upload = multer();
 // TEMP: allow all origins — we can restrict to NetSuite later
 app.use(cors({ origin: "*" }));
 
-// Load your OpenAI key from Render environment
+// Load OpenAI API Key (Render env var)
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 /**
- * OCR ENDPOINT
- * Receives a PDF/Word file, sends it to OpenAI Vision, returns structured JSON.
+ * OCR ENDPOINT (TEST MODE: ONE FIELD ONLY)
+ * Extracts ONLY the Legal Business Name for validation.
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
-    }
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
 
-    // Allow PDF or Word files. (Can expand later)
+    // Accept only PDF or Word docs for now
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -38,82 +36,40 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Only PDF or Word documents are allowed" });
     }
 
-    // Max 3MB safety limit
+    // Safety: Max 3MB
     if (buffer.length > 3 * 1024 * 1024) {
       return res.status(400).json({ error: "File too large (max 3MB)" });
     }
 
-    // Convert file to Base64 for Vision API
+    // Convert to Base64 for Vision API
     const base64 = buffer.toString("base64");
 
-    // UNIVERSAL, FORM-AGNOSTIC EXTRACTION PROMPT
+    // TEST PROMPT — extract ONLY the legal business name
     const prompt = `
-You are an AI that extracts structured business information from ANY credit application,
-credit reference sheet, bank reference, or commercial credit form.
+You are an OCR extraction engine.
+Extract ONLY the Legal Business Name from this credit application.
 
-Extract data based on MEANING — not position, formatting, or layout.
-
-Return ONLY valid JSON using this schema:
+Return EXACTLY this JSON object:
 
 {
-  "legal_name": "",
-  "dba_name": "",
-  "address1": "",
-  "address2": "",
-  "city": "",
-  "state": "",
-  "zip": "",
-  "country": "",
-  "phone": "",
-  "fax": "",
-  "email": "",
-  "website": "",
-
-  "tax_id": "",
-  "fein": "",
-  "tin": "",
-  "duns": "",
-  "years_in_business": "",
-  "employees": "",
-  "state_of_incorporation": "",
-  "entity_type": "",
-
-  "bank_name": "",
-  "bank_account_number": "",
-  "bank_contact_name": "",
-  "bank_contact_phone": "",
-  "bank_contact_email": "",
-  "bank_contact_address": "",
-
-  "trade_refs": [
-    {
-      "name": "",
-      "contact": "",
-      "phone": "",
-      "email": "",
-      "address": ""
-    }
-  ]
+  "legal_business_name": ""
 }
 
-RULES:
-- If a field is missing or unreadable, return it as an empty string.
-- Normalize phone numbers when possible.
-- Return ONLY raw JSON. No comments, no explanation.
+Rules:
+- Do NOT add any text outside the JSON.
+- Do NOT include comments or explanation.
+- If the legal business name cannot be located, return an empty string.
 `;
 
-    // Send to OpenAI Vision OCR
+    // Call OpenAI Vision
     const aiResponse = await client.chat.completions.create({
-      model: "gpt-4o-mini",   // Fast + excellent OCR + lowest cost
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "user",
           content: [
             { type: "text", text: prompt },
-            {
-              type: "input_image",
-              image_url: `data:${mimeType};base64,${base64}`
-            }
+            { type: "input_image", image_url: `data:${mimeType};base64,${base64}` }
           ]
         }
       ]
@@ -121,7 +77,7 @@ RULES:
 
     const raw = aiResponse.choices[0].message.content;
 
-    // Try to parse JSON returned by the model
+    // Ensure valid JSON
     let parsedJSON;
     try {
       parsedJSON = JSON.parse(raw);
@@ -130,6 +86,7 @@ RULES:
       return res.json({ error: "OCR returned non-JSON output", raw });
     }
 
+    // Return clean JSON to Suitelet
     res.json(parsedJSON);
 
   } catch (err) {
@@ -138,10 +95,7 @@ RULES:
   }
 });
 
-
-/**
- * BASIC HEALTH CHECK
- */
+/** BASIC HEALTH CHECK */
 app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
