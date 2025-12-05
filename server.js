@@ -6,17 +6,17 @@ import cors from "cors";
 const app = express();
 const upload = multer();
 
-// TEMP: allow all origins — we can restrict to NetSuite later
+// TEMP: allow all origins — restrict later
 app.use(cors({ origin: "*" }));
 
-// Load OpenAI key from Render environment
+// Load OpenAI key from Render env variables
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 /**
  * OCR ENDPOINT — TEST MODE
- * Extract ONLY the Legal Business Name so we can verify end-to-end autofill.
+ * Extract ONLY the Legal Business Name from the PDF.
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
@@ -27,7 +27,7 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
 
-    // Accept only PDF & Word files
+    // Only PDFs & Word docs
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -40,63 +40,65 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
       });
     }
 
-    // Max 3MB file protection
-    if (buffer.length > 3 * 1024 * 1024) {
+    // Safety limit
+    if (buffer.length > 5 * 1024 * 1024) {
       return res.status(400).json({
-        error: "File too large (max 3MB)"
+        error: "File too large (max 5MB)"
       });
     }
 
-    // --- TEST PROMPT ---
+    // Step 1 — Upload file to OpenAI
+    const uploadedFile = await client.files.create({
+      file: buffer,
+      purpose: "vision"
+    });
+
+    // Step 2 — OCR prompt (test mode)
     const prompt = `
 Extract ONLY the Legal Business Name from this credit application.
 
 Return EXACTLY this JSON:
-
 {
   "legal_business_name": ""
 }
 
 Rules:
 - Return ONLY JSON.
-- No markdown.
-- If not found, return empty string.
+- No text outside the JSON.
+- If legal name cannot be detected, return an empty string.
     `;
 
-    // Upload file to OpenAI (correct method for PDFs)
-    const uploaded = await client.files.create({
-      file: buffer,
-      purpose: "vision" // tells OpenAI we want OCR / vision analysis
-    });
-
-    // Request OCR from OpenAI using new Responses API
+    // Step 3 — Call Responses API with attachment
     const aiResponse = await client.responses.create({
       model: "gpt-4.1-mini",
-      input: prompt,
+      messages: [
+        { role: "user", content: prompt }
+      ],
       attachments: [
         {
-          file_id: uploaded.id,
+          file_id: uploadedFile.id,
           tools: [{ type: "file_viewer" }]
         }
       ]
     });
 
-    const rawOutput = aiResponse.output_text;
+    // Extract text output from the model
+    const raw = aiResponse.output_text;
 
     // Validate JSON
     let parsed;
     try {
-      parsed = JSON.parse(rawOutput);
+      parsed = JSON.parse(raw);
     } catch (err) {
-      console.error("Non-JSON OCR output:", rawOutput);
+      console.error("OCR returned non-JSON:", raw);
       return res.json({
         error: "OCR returned non-JSON output",
-        raw: rawOutput
+        raw
       });
     }
 
-    // Return JSON back to NetSuite Suitelet
-    res.json(parsed);
+    // Good to go
+    return res.json(parsed);
 
   } catch (err) {
     console.error("OCR ERROR:", err);
@@ -112,6 +114,7 @@ app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
 
+// Start server
 app.listen(process.env.PORT || 3000, () => {
   console.log("OCR server running");
 });
