@@ -9,14 +9,13 @@ const upload = multer();
 // TEMP: allow all origins — restrict later
 app.use(cors({ origin: "*" }));
 
-// Load OpenAI key from Render env variables
+// Load OpenAI key
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 /**
- * OCR ENDPOINT — TEST MODE
- * Extract ONLY the Legal Business Name from the PDF.
+ * OCR ENDPOINT — Extract ONLY “Legal Business Name”
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
@@ -27,7 +26,6 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
 
-    // Only PDFs & Word docs
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -40,20 +38,19 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
       });
     }
 
-    // Safety limit
-    if (buffer.length > 5 * 1024 * 1024) {
+    if (buffer.length > 10 * 1024 * 1024) {
       return res.status(400).json({
-        error: "File too large (max 5MB)"
+        error: "File too large (max 10MB)"
       });
     }
 
-    // Step 1 — Upload file to OpenAI
+    // 🔥🔥 FIX: Must use purpose:"assistants" for Vision PDF support
     const uploadedFile = await client.files.create({
       file: buffer,
-      purpose: "vision"
+      purpose: "assistants"
     });
 
-    // Step 2 — OCR prompt (test mode)
+    // OCR prompt
     const prompt = `
 Extract ONLY the Legal Business Name from this credit application.
 
@@ -64,11 +61,11 @@ Return EXACTLY this JSON:
 
 Rules:
 - Return ONLY JSON.
-- No text outside the JSON.
-- If legal name cannot be detected, return an empty string.
-    `;
+- No text outside JSON.
+- If not found, return empty string.
+`;
 
-    // Step 3 — Call Responses API with attachment
+    // Vision OCR using Responses API with file viewer tool
     const aiResponse = await client.responses.create({
       model: "gpt-4.1-mini",
       messages: [
@@ -82,10 +79,8 @@ Rules:
       ]
     });
 
-    // Extract text output from the model
     const raw = aiResponse.output_text;
 
-    // Validate JSON
     let parsed;
     try {
       parsed = JSON.parse(raw);
@@ -97,24 +92,22 @@ Rules:
       });
     }
 
-    // Good to go
     return res.json(parsed);
 
   } catch (err) {
     console.error("OCR ERROR:", err);
-    res.status(500).json({
+    return res.status(500).json({
       error: "OCR processing failed",
       details: err.message
     });
   }
 });
 
-/** BASIC HEALTH CHECK */
+// Health check
 app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
 
-// Start server
 app.listen(process.env.PORT || 3000, () => {
   console.log("OCR server running");
 });
