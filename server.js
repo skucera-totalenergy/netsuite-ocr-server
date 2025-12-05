@@ -6,26 +6,28 @@ import cors from "cors";
 const app = express();
 const upload = multer();
 
-// TEMP: allow all origins — we can restrict to NetSuite later
+// TEMP: allow all origins — later we restrict to NetSuite domain
 app.use(cors({ origin: "*" }));
 
-// Load OpenAI API Key (Render env var)
+// Load OpenAI key from Render environment
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 /**
- * OCR ENDPOINT (TEST MODE: ONE FIELD ONLY)
- * Extracts ONLY the Legal Business Name for validation.
+ * OCR ENDPOINT — TEST MODE
+ * Extract ONLY the Legal Business Name so we can verify end-to-end autofill.
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
 
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
 
-    // Accept only PDF or Word docs for now
+    // Accept only PDF & Word files
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -33,35 +35,39 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     ];
 
     if (!allowed.includes(mimeType)) {
-      return res.status(400).json({ error: "Only PDF or Word documents are allowed" });
+      return res
+        .status(400)
+        .json({ error: "Only PDF or Word documents are allowed" });
     }
 
-    // Safety: Max 3MB
+    // Max 3MB file protection
     if (buffer.length > 3 * 1024 * 1024) {
-      return res.status(400).json({ error: "File too large (max 3MB)" });
+      return res
+        .status(400)
+        .json({ error: "File too large (max 3MB)" });
     }
 
-    // Convert to Base64 for Vision API
+    // Base64 encode file for Vision model
     const base64 = buffer.toString("base64");
 
-    // TEST PROMPT — extract ONLY the legal business name
+    // --- TEST PROMPT ---
+    // Extract ONLY the legal business name for now (so we can verify Suitelet autofill)
     const prompt = `
-You are an OCR extraction engine.
 Extract ONLY the Legal Business Name from this credit application.
 
-Return EXACTLY this JSON object:
+Return EXACTLY this JSON:
 
 {
   "legal_business_name": ""
 }
 
 Rules:
-- Do NOT add any text outside the JSON.
-- Do NOT include comments or explanation.
-- If the legal business name cannot be located, return an empty string.
-`;
+- Return ONLY JSON.
+- No surrounding text, no markdown.
+- If legal name cannot be detected, return an empty string.
+    `;
 
-    // Call OpenAI Vision
+    // Send the Vision request
     const aiResponse = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -69,7 +75,10 @@ Rules:
           role: "user",
           content: [
             { type: "text", text: prompt },
-            { type: "input_image", image_url: `data:${mimeType};base64,${base64}` }
+            {
+              type: "image_url",
+              image_url: `data:${mimeType};base64,${base64}`
+            }
           ]
         }
       ]
@@ -77,25 +86,31 @@ Rules:
 
     const raw = aiResponse.choices[0].message.content;
 
-    // Ensure valid JSON
-    let parsedJSON;
+    // Ensure JSON is valid
+    let parsed;
     try {
-      parsedJSON = JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch (err) {
-      console.error("OCR returned non-JSON:", raw);
-      return res.json({ error: "OCR returned non-JSON output", raw });
+      console.error("Non-JSON OCR output:", raw);
+      return res.json({
+        error: "OCR returned non-JSON output",
+        raw
+      });
     }
 
-    // Return clean JSON to Suitelet
-    res.json(parsedJSON);
+    // Return JSON to Suitelet
+    res.json(parsed);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "OCR processing failed", details: err.message });
+    console.error("OCR ERROR:", err);
+    res.status(500).json({
+      error: "OCR processing failed",
+      details: err.message
+    });
   }
 });
 
-/** BASIC HEALTH CHECK */
+/** BASIC HEALTH CHECK (GET /) */
 app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
