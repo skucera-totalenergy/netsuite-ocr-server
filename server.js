@@ -6,7 +6,7 @@ import cors from "cors";
 const app = express();
 const upload = multer();
 
-// TEMP: allow all origins — later restrict to NetSuite domain
+// TEMP: allow all origins — we can restrict to NetSuite later
 app.use(cors({ origin: "*" }));
 
 // Load OpenAI key from Render environment
@@ -16,7 +16,7 @@ const client = new OpenAI({
 
 /**
  * OCR ENDPOINT — TEST MODE
- * Extract ONLY the Legal Business Name so we can verify autofill.
+ * Extract ONLY the Legal Business Name so we can verify end-to-end autofill.
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
@@ -35,24 +35,19 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     ];
 
     if (!allowed.includes(mimeType)) {
-      return res
-        .status(400)
-        .json({ error: "Only PDF or Word documents are allowed" });
+      return res.status(400).json({
+        error: "Only PDF or Word documents are allowed"
+      });
     }
 
-    // Max 3MB file size
+    // Max 3MB file protection
     if (buffer.length > 3 * 1024 * 1024) {
       return res.status(400).json({
         error: "File too large (max 3MB)"
       });
     }
 
-    // Convert file to Base64
-    const base64 = buffer.toString("base64");
-
-    // ------------------------------------------
-    // OCR PROMPT — extract ONLY legal business name
-    // ------------------------------------------
+    // --- TEST PROMPT ---
     const prompt = `
 Extract ONLY the Legal Business Name from this credit application.
 
@@ -63,36 +58,32 @@ Return EXACTLY this JSON:
 }
 
 Rules:
-- Return ONLY the JSON object.
-- No markdown, no text, no explanation.
-- If legal name cannot be detected, return an empty string.
+- Return ONLY JSON.
+- No markdown.
+- If not found, return empty string.
     `;
 
-    // ------------------------------------------
-    // SEND REQUEST TO OPENAI VISION
-    // MUST USE OBJECT VERSION OF image_url
-    // ------------------------------------------
-    const aiResponse = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
+    // Upload file to OpenAI (correct method for PDFs)
+    const uploaded = await client.files.create({
+      file: buffer,
+      purpose: "vision" // tells OpenAI we want OCR / vision analysis
+    });
+
+    // Request OCR from OpenAI using new Responses API
+    const aiResponse = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: prompt,
+      attachments: [
         {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mimeType};base64,${base64}`
-              }
-            }
-          ]
+          file_id: uploaded.id,
+          tools: [{ type: "file_viewer" }]
         }
       ]
     });
 
-    const rawOutput = aiResponse.choices[0].message.content;
+    const rawOutput = aiResponse.output_text;
 
-    // Try to parse JSON
+    // Validate JSON
     let parsed;
     try {
       parsed = JSON.parse(rawOutput);
@@ -104,7 +95,7 @@ Rules:
       });
     }
 
-    // Return clean JSON to the Suitelet
+    // Return JSON back to NetSuite Suitelet
     res.json(parsed);
 
   } catch (err) {
