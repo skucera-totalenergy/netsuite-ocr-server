@@ -15,7 +15,7 @@ const client = new OpenAI({
 });
 
 /**
- * OCR – USING FILES API (THE CORRECT WAY)
+ * OCR ENDPOINT — FINAL WORKING VERSION
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
@@ -27,7 +27,6 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     const mimeType = req.file.mimetype;
     const originalName = req.file.originalname;
 
-    // Allowed file types
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -35,80 +34,70 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     ];
 
     if (!allowed.includes(mimeType)) {
-      return res.status(400).json({
-        error: "Only PDF or Word documents allowed"
-      });
+      return res.status(400).json({ error: "Only PDF or Word documents allowed" });
     }
 
-    // Write buffer to a temp file
+    // Save file temporarily
     const tempPath = `/tmp/${Date.now()}_${originalName}`;
     fs.writeFileSync(tempPath, buffer);
 
-    console.log("Uploading file to OpenAI:", tempPath);
+    console.log("Uploading file:", tempPath);
 
-    // STEP 1 — Upload file to OpenAI Files API
-    const fileUpload = await client.files.create({
+    // STEP 1 — Upload file into OpenAI Files API
+    const uploaded = await client.files.create({
       file: fs.createReadStream(tempPath),
-      purpose: "assistants"  // required purpose
+      purpose: "assistants"
     });
 
-    console.log("File uploaded to OpenAI:", fileUpload.id);
+    console.log("Uploaded file ID:", uploaded.id);
 
-    // STEP 2 — Call GPT-4o-mini Vision referencing the uploaded file
+    // STEP 2 — Call GPT-4o-mini Vision via Responses API
     const prompt = `
-Extract ONLY the Legal Business Name from this credit application.
-
-Return JSON:
+Extract only the Legal Business Name from this document.
+Return JSON exactly like this:
 
 {
   "legal_business_name": ""
 }
 
-Rules:
-- Return ONLY JSON.
-- No markdown, no commentary.
+No additional commentary.
 `;
 
-    const visionResponse = await client.responses.create({
+    const response = await client.responses.create({
       model: "gpt-4o-mini",
       input: [
-        { role: "user", content: prompt },
-        { role: "user", content: { input_file: fileUpload.id } }
+        prompt,
+        { file_id: uploaded.id }  // CORRECT way to attach the file
       ]
     });
 
-    const raw = visionResponse.output_text;
+    const raw = response.output_text;
+    console.log("RAW MODEL OUTPUT:", raw);
 
-    console.log("Model raw output:", raw);
-
-    // STEP 3 — Parse JSON cleanly
+    // STEP 3 — Parse JSON safely
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      console.error("FAILED TO PARSE JSON:", raw);
-      return res.json({
-        error: "OCR returned invalid JSON",
-        raw
-      });
+      console.error("JSON parse failed:", raw);
+      return res.json({ error: "Invalid JSON returned", raw });
     }
 
-    // STEP 4 — return to Suitelet
+    // STEP 4 — Send to Suitelet
     res.json(parsed);
 
-    // Clean temp file
+    // Cleanup
     fs.unlinkSync(tempPath);
 
   } catch (err) {
     console.error("OCR ERROR:", err);
     res.status(500).json({
-      error: "OCR processing failed",
+      error: "OCR processing failure",
       details: err.message
     });
   }
 });
 
-/** Health check */
 app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
