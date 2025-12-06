@@ -2,20 +2,20 @@ import express from "express";
 import multer from "multer";
 import OpenAI from "openai";
 import cors from "cors";
+import fs from "fs";
 
 const app = express();
 const upload = multer();
 
-// TEMP: allow all origins — restrict later
 app.use(cors({ origin: "*" }));
 
-// Load OpenAI key
+// OpenAI client
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 /**
- * OCR ENDPOINT — Extract ONLY “Legal Business Name”
+ * OCR – USING FILES API (THE CORRECT WAY)
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
   try {
@@ -25,7 +25,9 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
 
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
+    const originalName = req.file.originalname;
 
+    // Allowed file types
     const allowed = [
       "application/pdf",
       "application/msword",
@@ -34,76 +36,79 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
 
     if (!allowed.includes(mimeType)) {
       return res.status(400).json({
-        error: "Only PDF or Word documents are allowed"
+        error: "Only PDF or Word documents allowed"
       });
     }
 
-    if (buffer.length > 10 * 1024 * 1024) {
-      return res.status(400).json({
-        error: "File too large (max 10MB)"
-      });
-    }
+    // Write buffer to a temp file
+    const tempPath = `/tmp/${Date.now()}_${originalName}`;
+    fs.writeFileSync(tempPath, buffer);
 
-    // 🔥🔥 FIX: Must use purpose:"assistants" for Vision PDF support
-    const uploadedFile = await client.files.create({
-      file: buffer,
-      purpose: "assistants"
+    console.log("Uploading file to OpenAI:", tempPath);
+
+    // STEP 1 — Upload file to OpenAI Files API
+    const fileUpload = await client.files.create({
+      file: fs.createReadStream(tempPath),
+      purpose: "assistants"  // required purpose
     });
 
-    // OCR prompt
+    console.log("File uploaded to OpenAI:", fileUpload.id);
+
+    // STEP 2 — Call GPT-4o-mini Vision referencing the uploaded file
     const prompt = `
 Extract ONLY the Legal Business Name from this credit application.
 
-Return EXACTLY this JSON:
+Return JSON:
+
 {
   "legal_business_name": ""
 }
 
 Rules:
 - Return ONLY JSON.
-- No text outside JSON.
-- If not found, return empty string.
+- No markdown, no commentary.
 `;
 
-    // Vision OCR using Responses API with file viewer tool
-    const aiResponse = await client.responses.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        { role: "user", content: prompt }
-      ],
-      attachments: [
-        {
-          file_id: uploadedFile.id,
-          tools: [{ type: "file_viewer" }]
-        }
+    const visionResponse = await client.responses.create({
+      model: "gpt-4o-mini",
+      input: [
+        { role: "user", content: prompt },
+        { role: "user", content: { input_file: fileUpload.id } }
       ]
     });
 
-    const raw = aiResponse.output_text;
+    const raw = visionResponse.output_text;
 
+    console.log("Model raw output:", raw);
+
+    // STEP 3 — Parse JSON cleanly
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      console.error("OCR returned non-JSON:", raw);
+      console.error("FAILED TO PARSE JSON:", raw);
       return res.json({
-        error: "OCR returned non-JSON output",
+        error: "OCR returned invalid JSON",
         raw
       });
     }
 
-    return res.json(parsed);
+    // STEP 4 — return to Suitelet
+    res.json(parsed);
+
+    // Clean temp file
+    fs.unlinkSync(tempPath);
 
   } catch (err) {
     console.error("OCR ERROR:", err);
-    return res.status(500).json({
+    res.status(500).json({
       error: "OCR processing failed",
       details: err.message
     });
   }
 });
 
-// Health check
+/** Health check */
 app.get("/", (req, res) => {
   res.send("OCR server is running.");
 });
