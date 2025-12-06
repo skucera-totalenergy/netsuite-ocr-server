@@ -16,6 +16,32 @@ const client = new OpenAI({
 });
 
 /**
+ * Small helper to reliably extract text from Responses API result.
+ * Some SDKs provide response.output_text as a convenience aggregator.
+ * This fallback guards against shape changes or multi-item outputs.
+ */
+function getResponseText(response) {
+  if (response?.output_text && typeof response.output_text === "string") {
+    return response.output_text.trim();
+  }
+
+  // Fallback: attempt to aggregate message output content
+  try {
+    const text = (response?.output ?? [])
+      .filter(item => item.type === "message")
+      .flatMap(msg => msg.content ?? [])
+      .filter(c => c.type === "output_text")
+      .map(c => c.text)
+      .join("\n")
+      .trim();
+
+    return text || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
  * OCR ENDPOINT — UPDATED FOR RESPONSES + PDF FILE INPUT
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
@@ -48,7 +74,8 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
      */
     if (mimeType !== "application/pdf") {
       return res.status(400).json({
-        error: "For this OCR endpoint, please upload a PDF. Word support requires converting DOC/DOCX to PDF for reliable file-input extraction."
+        error:
+          "For this OCR endpoint, please upload a PDF. Word support requires converting DOC/DOCX to PDF for reliable file-input extraction."
       });
     }
 
@@ -81,8 +108,12 @@ No additional commentary.
 
     const response = await client.responses.create({
       model: "gpt-4o-mini",
-      // JSON mode to reduce malformed JSON
-      response_format: { type: "json_object" },
+
+      // ✅ Responses API JSON mode uses text.format (not response_format)
+      text: {
+        format: { type: "json_object" }
+      },
+
       input: [
         {
           role: "user",
@@ -94,8 +125,7 @@ No additional commentary.
       ]
     });
 
-    // The SDK typically provides this convenience field
-    const raw = (response.output_text || "").trim();
+    const raw = getResponseText(response);
 
     console.log("RAW MODEL OUTPUT:", raw);
 
@@ -106,6 +136,15 @@ No additional commentary.
     } catch (err) {
       console.error("JSON parse failed:", raw);
       return res.json({ error: "Invalid JSON returned", raw });
+    }
+
+    // Optional hard guard: ensure key exists
+    if (!parsed || typeof parsed.legal_business_name !== "string") {
+      return res.json({
+        error: "JSON returned but missing expected key",
+        raw,
+        parsed
+      });
     }
 
     // STEP 4 — Respond
