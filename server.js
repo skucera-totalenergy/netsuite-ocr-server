@@ -3,9 +3,10 @@ import multer from "multer";
 import OpenAI from "openai";
 import cors from "cors";
 import fs from "fs";
+import path from "path";
 
 const app = express();
-const upload = multer();
+const upload = multer(); // memory storage by default
 
 app.use(cors({ origin: "*" }));
 
@@ -15,9 +16,11 @@ const client = new OpenAI({
 });
 
 /**
- * OCR ENDPOINT — FINAL WORKING VERSION
+ * OCR ENDPOINT — UPDATED FOR RESPONSES + PDF FILE INPUT
  */
 app.post("/ocr", upload.single("file"), async (req, res) => {
+  let tempPath = null;
+
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -25,7 +28,7 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
 
     const buffer = req.file.buffer;
     const mimeType = req.file.mimetype;
-    const originalName = req.file.originalname;
+    const originalName = req.file.originalname || "upload";
 
     const allowed = [
       "application/pdf",
@@ -37,8 +40,21 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Only PDF or Word documents allowed" });
     }
 
+    /**
+     * IMPORTANT:
+     * For this specific Responses API "input_file" approach,
+     * we are keeping the next test predictable by requiring PDF.
+     * Word support can be added later by converting DOC/DOCX → PDF upstream.
+     */
+    if (mimeType !== "application/pdf") {
+      return res.status(400).json({
+        error: "For this OCR endpoint, please upload a PDF. Word support requires converting DOC/DOCX to PDF for reliable file-input extraction."
+      });
+    }
+
     // Save file temporarily
-    const tempPath = `/tmp/${Date.now()}_${originalName}`;
+    const safeName = originalName.replace(/[^\w.\-]+/g, "_");
+    tempPath = path.join("/tmp", `${Date.now()}_${safeName}`);
     fs.writeFileSync(tempPath, buffer);
 
     console.log("Uploading file:", tempPath);
@@ -46,15 +62,15 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
     // STEP 1 — Upload file into OpenAI Files API
     const uploaded = await client.files.create({
       file: fs.createReadStream(tempPath),
-      purpose: "assistants"
+      purpose: "user_data"
     });
 
     console.log("Uploaded file ID:", uploaded.id);
 
-    // STEP 2 — Call GPT-4o-mini Vision via Responses API
+    // STEP 2 — Call the model with correct Responses input shape
     const prompt = `
 Extract only the Legal Business Name from this document.
-Return JSON exactly like this:
+Return a JSON object exactly like this:
 
 {
   "legal_business_name": ""
@@ -65,13 +81,22 @@ No additional commentary.
 
     const response = await client.responses.create({
       model: "gpt-4o-mini",
+      // JSON mode to reduce malformed JSON
+      response_format: { type: "json_object" },
       input: [
-        prompt,
-        { file_id: uploaded.id }  // CORRECT way to attach the file
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: prompt },
+            { type: "input_file", file_id: uploaded.id }
+          ]
+        }
       ]
     });
 
-    const raw = response.output_text;
+    // The SDK typically provides this convenience field
+    const raw = (response.output_text || "").trim();
+
     console.log("RAW MODEL OUTPUT:", raw);
 
     // STEP 3 — Parse JSON safely
@@ -83,18 +108,24 @@ No additional commentary.
       return res.json({ error: "Invalid JSON returned", raw });
     }
 
-    // STEP 4 — Send to Suitelet
+    // STEP 4 — Respond
     res.json(parsed);
-
-    // Cleanup
-    fs.unlinkSync(tempPath);
 
   } catch (err) {
     console.error("OCR ERROR:", err);
     res.status(500).json({
       error: "OCR processing failure",
-      details: err.message
+      details: err?.message || String(err)
     });
+  } finally {
+    // Cleanup
+    try {
+      if (tempPath && fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch (cleanupErr) {
+      console.warn("Temp cleanup failed:", cleanupErr?.message || cleanupErr);
+    }
   }
 });
 
